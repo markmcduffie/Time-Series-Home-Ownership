@@ -1,0 +1,360 @@
+---
+title: "final_project"
+author: "Mark McDuffie, Sean Crow, Sarah Akbar"
+date: "2022-11-23"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r}
+library(xts)
+library(mgcv)
+library(data.table)
+library(vars)
+library(tseries)
+library(aod)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(lubridate)
+
+```
+
+
+loading and cleaning Datasets
+```{r}
+
+#Home Ownership
+
+HO_pre = read.table("Homeownership Rate-1.csv",header=F)
+
+HO_pre <- HO_pre[104:271,1]
+HO_final <- str_split_fixed(HO_pre, ',', 2)
+HO_final <- as.data.frame(HO_final)
+HO_final <- HO_final %>% rename_at(2, ~'Home Ownership')
+HO_final <- HO_final %>% rename_at(1, ~'Fiscal Quarter')
+HO_final$`Fiscal Quarter` <- str_replace_all(HO_final$`Fiscal Quarter`, 'Q1', '01-01')
+HO_final$`Fiscal Quarter` <- str_replace_all(HO_final$`Fiscal Quarter`, 'Q2', '04-01')
+HO_final$`Fiscal Quarter` <- str_replace_all(HO_final$`Fiscal Quarter`, 'Q3', '07-01')
+HO_final$`Fiscal Quarter` <- str_replace_all(HO_final$`Fiscal Quarter`, 'Q4', '10-01')
+head(HO_final)
+
+```
+
+```{r}
+#Interest Rates
+
+interest = read.table("Interest rate.csv",header=T)
+interest <- as.data.frame(interest)
+interest_final <- separate(interest, col = DATE.FEDFUNDS, into = c('Date', 'FEDFUNDS'), sep = ",")
+interest_final <- interest_final[307:810,]
+
+#quarterly interest data for later purposes
+interest_final2 = interest_final[seq(1, nrow(interest_final), 3), ]
+```
+
+
+```{r}
+#Median Sale Price
+
+price <- read.table("Median Sales Price of Houses Sold by Quarter.csv",header=T)
+price <- as.data.frame(price)
+price_final <- separate(price, col = DATE.MSPUS, into = c('Date', 'Median Sale Price'), sep = ",")
+price_final <- price_final[69:236,]
+
+```
+
+```{r}
+#Real GDP by quarter
+gdp <- read.table("Real GDP by Quarter.csv",header=T)
+gdp <- as.data.frame(gdp)
+gdp_final <- separate(gdp, col = DATE.GDPC1, into = c('Date', 'GDP'), sep = ",")
+gdp_final <- gdp_final[133:300,]
+
+```
+
+Now that the data is clean we can create a time series for each factor in home ownership and merge the time series together in an ACF plot
+
+
+```{r}
+ho_date <- mdy(HO_final$`Fiscal Quarter`)
+tsho <- ts(as.numeric(HO_final$`Home Ownership`), start = '1980', frequency = 4)
+
+interest_date <- as.Date(interest_final$Date)
+tsinterest <- ts(as.numeric(interest_final$FEDFUNDS), start = '1980', frequency = 12)
+
+interest_date2 <- as.Date(interest_final2$Date)
+tsinterest2 <- ts(as.numeric(interest_final2$FEDFUNDS), start = '1980', frequency = 4)
+
+dates_median <- as.Date(price_final$Date)
+tsmedianprice<-ts(as.numeric(price_final$`Median Sale Price`), start = '1980', frequency = 4)
+
+dates_GDP<-as.Date(gdp_final$Date)
+tsgdp<-ts(as.numeric(gdp_final$GDP),start = '1980', frequency = 4)
+
+par(mfrow=c(2, 2))
+plot(tsinterest,main='Interest Rate %', ylab = 'Interest Rate')
+plot(tsmedianprice,main='Median Home Sale Price -USD', ylab = 'Sale Price')
+plot(tsgdp,main='Real GDP', ylab = 'GDP (USD)')
+plot(tsho,main='Home Ownership', ylab = 'Ownership Rate')
+```
+
+```{r}
+
+#calculating and plotting the logged differences for each time series
+#we can see an exponential increase in the plotted time series for interest rate and median home values, so a log transformation is necessary to make th return values linear
+interest_merge <- xts(interest_final2$FEDFUNDS, interest_date2)
+median_merge <- xts(price_final$`Median Sale Price`, dates_median)
+gdp_merge <- xts(gdp_final$GDP, dates_GDP)
+ho_merge <- xts(HO_final$`Home Ownership`, ho_date)
+
+
+dlinterest <- log(as.numeric(interest_merge))
+dlmedian <- log(as.numeric(median_merge))
+dlgdp <- log(as.numeric(gdp_merge))
+dlho <- log(as.numeric(ho_merge))
+
+interest_merge_dl <- xts(dlinterest, interest_date2)
+median_merge_dl <- xts(dlmedian, dates_median)
+gdp_merge_dl <- xts(dlgdp, dates_GDP)
+ho_merge_dl <- xts(dlho, ho_date)
+
+par(mfrow=c(2, 2))
+plot(dlinterest,main='Interest rate return')
+plot(dlmedian,main='Median Home value return')
+plot(dlgdp,main='GDP return')
+plot(dlho, main= 'Home Ownership')
+
+```
+We are implementing a stationary VAR model, so our log and differenced transformations are necessary before building the model.
+
+Now that we have all 3 time series, we can perform an ACF analysis joining them together
+```{r}
+
+
+ts.merge <- merge(ho_merge, median_merge, join = 'inner')
+ts.merge <- merge(ts.merge,gdp_merge, join='inner')
+ts.merge <- merge(ts.merge, interest_merge, join = 'inner')
+
+dl.merge <- merge(ho_merge_dl,median_merge_dl, join='inner')
+dl.merge <- merge(dl.merge,gdp_merge_dl, join='inner')
+dl.merge <- merge(dl.merge, interest_merge_dl, join ='inner')
+colnames(dl.merge)<-c("Home Ownership", "Interest rate","Median Sale Price","GDP")
+
+acf(dl.merge, main = "")
+```
+The charts above show the Auto and Cross dependence of Home ownership based on the other 3 time series. The auto-correlation is on the diagonal while the cross-correlation is off the diagonal.
+
+All the auto-correlation functions resemble a white noise. The ACF charts show cross correlation between home ownership and median sale price, as well as home ownership and GDP in the lagged time series.
+
+
+
+```{r}
+VARselect(dl.merge, lag.max = 15, season = 4)$selection
+plot(VARselect(dl.merge)$criteria[1,], xlab = "Order", ylab = "AIC")
+```
+
+using the results of VAR select, building our model with a lag of 3 would be most appropriate
+A value of P = 7 indicated the number of lags for each variable in the equation. this means we will need p parameters for modeling each of the n time series
+
+
+
+Before building a model, we want to build a variance-covariance matrix to analyze the relationships between predictors
+
+
+```{r}
+cov_dl <- as.data.frame(dl.merge)
+
+print("covaraince Matrix for home ownership variables")
+cov(cov_dl)
+```
+```{r}
+
+#split into training and test data
+#we want to leave out the data for coronavirus for our first train/test split
+n = length(dl.merge[,1])
+
+dl.train <- dl.merge[1:(n-20),]
+dl.test <- dl.merge[(n-20):n,]
+
+dl.train2 <- dl.merge[1:(n-8),]
+# Unrestricted VAR
+mod.var = VAR(dl.train, p=7)
+mod.var2 = VAR(dl.train2, p=7)
+
+# Restricted VAR    
+mod.var.restrict = restrict(mod.var)
+
+```
+Based on the estimation coefficients for home ownership, all of the P values are large, suggesting that there is no significant relationship between Interest rate, median sale price, GDP, and home ownership rates.
+
+We did, however, find a significant relationship median lag 1 median sale price and GDP, as well as lag 2 interest rate and median sale price.
+
+
+
+After fitting and analyzing the order 3 model, it is necessary to perform a residual analysis. In this analysis I am going to test for 2 things: constant variance, and normality
+
+```{r}
+#fit for entire model
+mod.var2 <- VAR(dl.merge, p = 7, type = "both")
+
+arch.test(mod.var2)
+
+normality.test(mod.var2)
+
+
+```
+
+Our results indicated that both normality and homoskedasticity of the residuals are violated, as we reject both null hypotheses with P values close to 0.
+
+
+We will now test for Granger causality for forecasting purposes
+
+```{r}
+
+
+
+n = 4 # there are 3 different regressors 
+p = 7 # our var selected order
+var.all = vcov(mod.var)
+## coefficient and variance-covariance matrix for btc
+ho.i = 1 # HO is the first column
+#first, we pull the coefficients for home ownership
+coef.ho <- coefficients(mod.var)$Home.Ownership[-(n*p+1),1]
+ho.index.min = 2+(ho.i-1)*(n*p+1) 
+ho.index.max = (n*p+1)*ho.i
+ho.index = c(ho.index.min:ho.index.max)
+var.ho = var.all[ho.index, ho.index]
+
+IR.i = 2 # Interest rate is the second column
+coef.ir <- coefficients(mod.var)$Interest.rate[-(n*p+1),1]
+ir.index.min = 2+(IR.i-1)*(n*p+1) 
+ir.index.max = (n*p+1)*IR.i
+ir.index = c(ir.index.min:ir.index.max)
+var.ir = var.all[ir.index, ir.index]
+                       
+MS.i = 3 # Median Sale Price is the third column
+coef.ms <- coefficients(mod.var)$Median.Sale.Price[-(n*p+1),1]
+MS.index.min = 2+(MS.i-1)*(n*p+1) 
+MS.index.max = (n*p+1)*MS.i
+MS.index = c(MS.index.min:MS.index.max)
+var.ms = var.all[MS.index, MS.index]
+
+GDP.i = 4 # GDP is the fourth column
+coef.gdp <- coefficients(mod.var)$GDP[-(n*p+1),1]
+gdp.index.min = 2+(GDP.i-1)*(n*p+1) 
+gdp.index.max = (n*p+1)*GDP.i
+gdp.index = c(gdp.index.min:gdp.index.max)
+var.gdp = var.all[gdp.index, gdp.index]
+```
+
+
+```{r}
+print("testing for granger causality between interest rate and home ownership")
+wald.test(b = coef.ho, var.ho, Terms = seq(IR.i,p*n,n))
+wald.test(b = coef.ir, var.ir, Terms = seq(1,28,4))
+
+
+print("testing for granger causality between median sale price and home ownership")
+wald.test(b = coef.ho, var.ho, Terms = seq(3,28,4))
+wald.test(b = coef.ms, var.ms, Terms = seq(1,28,4))
+
+
+print("testing for granger causality between GDP and home ownership")
+wald.test(b = coef.ho, var.ho, Terms = seq(4,28,4))
+wald.test(b = coef.gdp, var.gdp, Terms = seq(1,28,4))
+```
+This Granger casuality test implies forecasting ability, not real causality. 
+The interpretation of these results is that changes home value, GDP, and Interest rate all plausibly do not influence changes in the home ownership rate, meaning we fail to reject the null hypothesis for all 3 predictors.
+
+However, can can reject the null hypothesis that home ownership percentage does not affect median home ownership, as that P value was less than our significance level of 0.1. This means home ownership imples forecasting causality for median sale price.
+
+Forecasting 
+```{r}
+#Predict future differences in home ownership
+pred.model = predict(mod.var, n.ahead = 20)
+
+ho.fcst = pred.model[[1]]$Home.Ownership[,1]
+upper = pred.model[[1]]$Home.Ownership[,3]
+lower = pred.model[[1]]$Home.Ownership[,2
+                                       ]
+y_predict <- exp(ho.fcst)
+u_predict <- exp(upper)
+l_predict <- exp(lower)
+
+
+ymin = 60
+ymax = 75
+
+y_values <- as.numeric(HO_final$`Home Ownership`)
+
+plot(ho_date[1:168],y_values[1:168], ylim=c(ymin,ymax), type = "l",ylab="Home Ownership Rate", xlab = "Year", main = "Figure 14: VAR Forecasted vs Actual Home Ownership Rate")
+
+points(ho_date[149:168],y_predict, col = "red")
+points(ho_date[149:168],u_predict, col = "blue")
+points(ho_date[149:168],l_predict, col = "blue")
+legend('topleft', legend=c("5 years ahead ","Upper-Lower bound"),lty = 2, col=c("red","blue"))
+
+
+```
+
+```{r}
+#Predict future differences in home ownership
+pred.model2 = predict(mod.var, n.ahead = 8)
+
+ho.fcst2 = pred.model2[[1]]$Home.Ownership[,1]
+upper2 = pred.model2[[1]]$Home.Ownership[,3]
+lower2 = pred.model2[[1]]$Home.Ownership[,2
+                                       ]
+y_predict2 <- exp(ho.fcst2)
+u_predict2 <- exp(upper2)
+l_predict2 <- exp(lower2)
+
+
+
+
+plot(ho_date[100:168],y_values[100:168], ylim=c(ymin,ymax), type = "l",ylab="Home Ownership Rate", xlab = "Year", main = "Figure 15: VAR Forecasted vs Actual Home Ownership Rate (Post Covid)")
+
+points(ho_date[161:168],y_predict2, col = "red")
+points(ho_date[161:168],u_predict2, col = "blue")
+points(ho_date[161:168],l_predict2, col = "blue")
+legend('topleft', legend=c("2 years ahead ","Upper-Lower bound"),lty = 2, col=c("red","blue"))
+
+
+```
+
+
+Ranking in terms of influence toward Home ownership rate based on Granger causality p values:
+1. Median Sale price
+2. GDP
+3. Interest Rate
+
+MAPE:
+```{r}
+real_values <- as.numeric(HO_final$`Home Ownership`[149:168])
+mean(abs(y_predict-real_values)/real_values)
+
+real_values2 <- as.numeric(HO_final$`Home Ownership`[161:168])
+mean(abs(y_predict2-real_values2)/real_values2)
+```
+
+```{r}
+resids.final.model = residuals(mod.var)
+acf(resids.final.model,main="ACF of VAR Residuals")
+plot(resids.final.model, main = 'Residual Plot of VAR Model')
+acf(resids.final.model^2,main="ACF of Squared VAR Residuals")
+
+```
+
+
+
+
+
